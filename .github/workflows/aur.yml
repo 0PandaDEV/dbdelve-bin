@@ -1,0 +1,74 @@
+name: aur-auto-update
+
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+  push:
+    paths:
+      - PKGBUILD
+      - .SRCINFO
+      - .github/scripts/**
+      - .github/workflows/aur.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: aur-publish
+  cancel-in-progress: false
+
+jobs:
+  update:
+    if: github.event_name != 'push' || github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Check the latest stable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/update.py
+
+      - name: Generate .SRCINFO with makepkg
+        run: |
+          docker run --rm --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp -v "$PWD:/pkg" -w /pkg archlinux:base-devel \
+            bash -c 'makepkg --printsrcinfo > .SRCINFO'
+
+      - name: Commit package updates to GitHub
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          git config --global user.name '0PandaDEV'
+          git config --global user.email '70103896+0PandaDEV@users.noreply.github.com'
+          git add PKGBUILD .SRCINFO
+          if ! git diff --cached --quiet; then
+            version=$(sed -n 's/^pkgver=//p' PKGBUILD)
+            git commit -m "chore: update dbdelve to $version"
+            git push origin "HEAD:$DEFAULT_BRANCH"
+          fi
+
+      # Run even when the version is unchanged: this also handles the initial
+      # publication, packaging fixes and retries after an earlier AUR failure.
+      - name: Publish package to AUR
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+          if [[ -z "$AUR_SSH_PRIVATE_KEY" ]]; then
+            echo '::warning::Set AUR_SSH_PRIVATE_KEY to enable AUR publishing.'
+            exit 0
+          fi
+
+          umask 077
+          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > "$RUNNER_TEMP/aur_key"
+          printf '%s\n' 'aur.archlinux.org ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEuBKrPzbawxA/k2g6NcyV5jmqwJ2s+zpgZGZ7tpLIcN' > "$RUNNER_TEMP/aur_known_hosts"
+          export GIT_SSH_COMMAND="ssh -i $RUNNER_TEMP/aur_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$RUNNER_TEMP/aur_known_hosts"
+          bash .github/scripts/publish-aur.sh
+
+      - name: Remove SSH credentials
+        if: always()
+        run: rm -f "$RUNNER_TEMP/aur_key" "$RUNNER_TEMP/aur_known_hosts"

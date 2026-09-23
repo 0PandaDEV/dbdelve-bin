@@ -1,0 +1,6 @@
+/src/
+/pkg/
+/dbdelve-*-linux-*.tar.gz
+/*.pkg.tar.*
+/*.src.tar.*
+__pycache__/
